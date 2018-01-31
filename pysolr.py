@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 from pkg_resources import DistributionNotFound, get_distribution, parse_version
 
 import requests
+import collections
 
 try:
     from kazoo.client import KazooClient, KazooState
@@ -807,6 +808,17 @@ class Solr(object):
     def _build_doc(self, doc, boost=None, fieldUpdates=None):
         doc_elem = ElementTree.Element('doc')
 
+        # Helper function
+        def _add_doc_elem(attrs, value):
+            if isinstance(value, (list, tuple)):
+                values = value
+            else:
+                values = (value, )
+            for bit in values:
+                field = ElementTree.Element('field', **attrs)
+                field.text = self._from_python(bit)
+                doc_elem.append(field)
+
         for key, value in doc.items():
             if key == NESTED_DOC_KEY:
                 for child in value:
@@ -817,33 +829,27 @@ class Solr(object):
                 doc_elem.set('boost', force_unicode(value))
                 continue
 
-            # To avoid multiple code-paths we'd like to treat all of our values as iterables:
-            if isinstance(value, (list, tuple, set)):
-                values = value
+            # Handle atomic updates
+            if isinstance(value, dict):
+                for _key, _values in value.iteritems():
+                    attrs = {'name': key, 'update': _key}
+
+                    if isinstance(_values, types.NoneType):
+                        attrs['null'] = 'true'
+
+                    if boost and key in boost:
+                        attrs['boost'] = force_unicode(boost[key])
+                    if not isinstance(_values, collections.Iterable):
+                        _values = (_values, )
+                    for v in _values:
+                        _add_doc_elem(attrs, v)
             else:
-                values = (value, )
-
-            for bit in values:
-                if self._is_null_value(bit):
-                    continue
-
-                if key == '_doc':
-                    child = self._build_doc(bit, boost)
-                    doc_elem.append(child)
-                    continue
-
                 attrs = {'name': key}
-
-                if fieldUpdates and key in fieldUpdates:
-                    attrs['update'] = fieldUpdates[key]
 
                 if boost and key in boost:
                     attrs['boost'] = force_unicode(boost[key])
 
-                field = ElementTree.Element('field', **attrs)
-                field.text = self._from_python(bit)
-
-                doc_elem.append(field)
+                _add_doc_elem(attrs, value)
 
         return doc_elem
 
@@ -860,8 +866,6 @@ class Solr(object):
         Optionally accepts ``softCommit``. Default is ``False``.
 
         Optionally accepts ``boost``. Default is ``None``.
-
-        Optionally accepts ``fieldUpdates``. Default is ``None``.
 
         Optionally accepts ``commitWithin``. Default is ``None``.
 
@@ -883,6 +887,16 @@ class Solr(object):
                     "title": "The Banana: Tasty or Dangerous?",
                 },
             ])
+
+        Starting from Solr 4.0 it's possible to using atomic updates.
+        Simply pass instead of raw value dict in format like::
+
+            {
+                "id": "doc_1",
+                "title": {"set": "A test document"},
+            }
+
+        where possible operators are: ``set``, ``inc`` and ``add``.
         """
         start_time = time.time()
         self.log.debug("Starting to build add request...")
